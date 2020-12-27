@@ -4,21 +4,43 @@
 from IPython import get_ipython
 
 # %% [markdown]
-# ## Install TensorTrade
+#  # Install Stable-baselines/ TensorTrade - Colab
 
 # %%
-#!python3 -m pip install git+https://github.com/tensortrade-org/tensortrade.git
+#install stable-baselines
+get_ipython().system('sudo apt-get update && sudo apt-get install cmake libopenmpi-dev zlib1g-dev')
+
+# setup dependencies
+# !python3 -m pip install git+https://github.com/tensortrade-org/tensortrade.git
+get_ipython().system('python3 -m pip install git+https://github.com/essamabas/tensortrade.git@live')
+get_ipython().system('pip install yfinance ta matplotlib s3fs')
+
+
+# %%
+get_ipython().system('pip install stable-baselines[mpi]==2.10.1')
+#select tensorflow version 1. - 
+get_ipython().run_line_magic('tensorflow_version', '1.x')
+
+
+# %%
+import stable_baselines
+stable_baselines.__version__
+
+
+# %% [markdown]
+# # Include Libraries
+
+# %%
+# setup dependencies
 import inspect
 import sys
 import os
 currentdir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
 parentdir = os.path.dirname(currentdir)
-sys.path.insert(0, "{}".format(parentdir))
+#sys.path.insert(0, "{}".format(parentdir))
+sys.path.append(parentdir)
 currentdir
 
-
-# %% [markdown]
-# ## Setup Data Fetching
 
 # %%
 import pandas as pd
@@ -28,15 +50,34 @@ from tensortrade.data.cdd import CryptoDataDownload
 from tensortrade.feed.core import Stream, DataFeed
 from tensortrade.oms.exchanges import Exchange
 from tensortrade.oms.services.execution.simulated import execute_order
-from tensortrade.oms.instruments import USD, BTC, ETH, AAPL
+# Make a stream of closing prices to make orders on
+from tensortrade.oms.instruments import USD, Instrument, Quantity
 from tensortrade.oms.wallets import Wallet, Portfolio
 from tensortrade.agents import DQNAgent
 from tensortrade.env.default.renderers import PlotlyTradingChart, FileLogger, MatplotlibTradingChart
 
+
 import gym
-from stable_baselines.common.vec_env import DummyVecEnv
+from stable_baselines.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines.common.policies import MlpPolicy, MlpLnLstmPolicy
 from stable_baselines import DQN, PPO2, A2C
+from stable_baselines.gail import generate_expert_traj
+
+import ta
+import numpy as np
+from datetime import datetime
+
+from scipy.signal import argrelextrema
+import numpy as np
+
+import yfinance as yf
+
+from plotly.subplots import make_subplots
+import plotly.graph_objects as go
+
+# silence warnings
+import warnings
+warnings.filterwarnings('ignore')
 
 get_ipython().run_line_magic('matplotlib', 'inline')
 
@@ -44,33 +85,28 @@ get_ipython().run_line_magic('matplotlib', 'inline')
 get_ipython().run_line_magic('load_ext', 'autoreload')
 get_ipython().run_line_magic('autoreload', '2')
 
+# %% [markdown]
+# # Helper Functions
 
 # %%
-# Use Data-Feed from Yahoo Finance
-sys.path.insert(0, "{}".format("D:\MyWork\StocksTrading\Sandboxes\AutoTrader"))
-from utils import YahooQuotesLoader
+def download_data(symbol: str, 
+                  start_date: str, 
+                  end_date: str = datetime.today().strftime('%Y-%m-%d'),
+                  plot: bool = False) -> pd.DataFrame:
+    # download Data
+    df = yf.download(symbol, start=start_date, end=end_date)
+    df.reset_index(inplace=True)
+    df.columns = [name.lower() for name in df.columns]
+    df.drop(columns=["adj close","volume"],inplace=True)
+    df.set_index("date",inplace=True)
+    if plot:
+      df['close'].plot()
 
-symbol = 'AAPL'
-exchange = 'NASDAQ'
-start_date = '2010-01-01'
-end_date = '2020-12-10'
-quotes = YahooQuotesLoader.get_quotes(
-        symbol=symbol,
-        date_from=start_date,
-        date_to=end_date,
-    )
-quotes.drop(columns=["index","unnamed: 0","adj close","volume"],inplace=True)
-quotes.set_index("date",inplace=True)
-quotes['close'].plot()
+    return df
 
-
-# %%
-
-import ta
-import numpy as np
-# custom ta-Features
-# Check https://github.com/bukosabino/ta
-# Visualization: https://github.com/bukosabino/ta/blob/master/examples_to_use/visualize_features.ipynb
+## Apply Technical-Indicators (TA)
+#- Check https://github.com/bukosabino/ta
+#- TA- Visualization: https://github.com/bukosabino/ta/blob/master/examples_to_use/visualize_features.ipynb
 def add_custom_ta_features(
     df: pd.DataFrame,
     open: str,  # noqa
@@ -79,96 +115,191 @@ def add_custom_ta_features(
     close: str,
     fillna: bool = False,
     colprefix: str = "",
+    apply_pct: bool = False,
+    plot: bool = False,
 ) -> pd.DataFrame:
 
+    # Add Volatility TA
     df = ta.add_volatility_ta(
         df=df, high=high, low=low, close=close, fillna=fillna, colprefix=colprefix
     )
+    # Add Trend TA
     df = ta.add_trend_ta(
         df=df, high=high, low=low, close=close, fillna=fillna, colprefix=colprefix
     )
+    # Add Other TA
     df = ta.add_others_ta(df=df, close=close, fillna=fillna, colprefix=colprefix)
+
+    # convert to pct
+    if apply_pct:
+      df = df.pct_change(fill_method ='ffill')
+      df = df.applymap(lambda x: x*100)
+      df.replace([np.inf, -np.inf], np.nan,inplace=True)
+    df.astype(np.float32)    
+    df = df.round(5)
+
+    if fillna: 
+      df.fillna(value=0,inplace=True)
+
+    if plot:
+      fig = make_subplots(rows=5, cols=1,
+                          shared_xaxes=True,
+                          vertical_spacing=0.02,
+                          subplot_titles=("Close", "Bollinger Bands","MACD"))
+
+      fig.add_trace(go.Scatter(
+          x=df.index,
+          y=df['close'],
+          name = symbol
+      ), row=1, col=1)
+
+      # Bollinger-Bands
+      fig.add_trace(go.Scatter(
+          x=df.index,
+          y=df['close'],
+          name = symbol
+      ), row=2, col=1)
+
+      fig.add_trace(go.Scatter(
+          x=df.index,
+          y=df['volatility_bbh'],
+          name = symbol+' High BB'
+      ), row=2, col=1)
+
+      fig.add_trace(go.Scatter(
+          x=df.index,
+          y=df['volatility_bbl'],
+          name = symbol+' Low BB'
+      ), row=2, col=1)
+
+      fig.add_trace(go.Scatter(
+          x=df.index,
+          y=df['volatility_bbm'],
+          name = symbol+' EMA BB' 
+      ), row=2, col=1)
+
+      # MACD
+      fig.add_trace(go.Scatter(
+          x=df.index,
+          y=df['trend_macd'],
+          name = symbol+' MACD'
+      ), row=3, col=1)
+
+      fig.add_trace(go.Scatter(
+          x=df.index,
+          y=df['trend_macd_signal'],
+          name = symbol+' MACD Signal'
+      ), row=3, col=1)
+
+      fig.add_trace(go.Scatter(
+          x=df.index,
+          y=df['trend_macd_diff'],
+          name = symbol+' MACD Difference'
+      ), row=3, col=1)
+
+      # SMA
+      fig.add_trace(go.Scatter(
+          x=df.index,
+          y=df['close'],
+          name = symbol
+      ), row=4, col=1)
+
+      fig.add_trace(go.Scatter(
+          x=df.index,
+          y=df['trend_sma_fast'],
+          name = symbol+' SMA-Fast'
+      ), row=4, col=1)
+
+      fig.add_trace(go.Scatter(
+          x=df.index,
+          y=df['trend_sma_slow'],
+          name = symbol+' SMA-Slow'
+      ), row=4, col=1)
+
+      # EMA
+      fig.add_trace(go.Scatter(
+          x=df.index,
+          y=df['close'],
+          name = symbol
+      ), row=5, col=1)
+
+      fig.add_trace(go.Scatter(
+          x=df.index,
+          y=df['trend_ema_fast'],
+          name = symbol+' EMA-Fast'
+      ), row=5, col=1)
+
+      fig.add_trace(go.Scatter(
+          x=df.index,
+          y=df['trend_ema_slow'],
+          name = symbol+' EMA-Slow'
+      ), row=5, col=1)              
+
+      config = {'displayModeBar': False}
+      fig.show(config=config)
+     
     return df
 
-# get ta-indicators
-quotes_ta = add_custom_ta_features(quotes,"open","high","low","close", fillna=True)
-
-# convert to pct
-#data = quotes_ta.pct_change(fill_method ='ffill')
-data = quotes_ta
-data = data.replace([np.inf, -np.inf], np.nan)
-data = data.fillna(value=0)
-data.reset_index(inplace=True)
-data.tail()
 
 
+def __classify(self, current_index,df_min,df_max):
+    '''
+    Apply Local/Min - Max analysis
+    '''
+    if current_index in df_min.index:
+        return 1 # buy-decision
+    elif current_index in df_max.index:
+        return -1 # sell-decision
+    else:  # otherwise... it's a 0!
+        return 0  # hold-decision
 
-# %%
-from scipy.signal import argrelextrema
-import numpy as np
+def find_loc_min_max(data: pd.DataFrame, 
+                     order_of_points=7,
+                     symbol: str = "symbol",
+                     plot:bool = False):
+    '''
+      Find local peaks
+    '''
+    df_min_ts = data.iloc[argrelextrema(data.org_close.values, np.less_equal, order=order_of_points)[0]].astype(np.float32)
+    df_max_ts = data.iloc[argrelextrema(data.org_close.values, np.greater_equal, order=order_of_points)[0]].astype(np.float32)
 
-# get Min/Max TimeStamps
-df_min_ts = data.iloc[argrelextrema(data.close.values, np.less_equal, order=7)[0]]#['date']
-df_max_ts = data.iloc[argrelextrema(data.close.values, np.greater_equal, order=7)[0]]#['date']
+    df_min_ts = df_min_ts.iloc[:, 0:5]
+    df_max_ts = df_max_ts.iloc[:, 0:5]
 
-# %%
-# Plot Min/Max with Plotly
-import plotly.graph_objects as go
+    if plot:
+      fig = go.Figure(data= go.Scatter(
+          x=data.index,
+          y=data['org_close'],
+          name = symbol
+      ))
+      #fig = go.Figure([go.Scatter(x=df['Date'], y=df['AAPL.High'])])                
+      fig.add_trace(go.Scatter(mode="markers", x=df_min_ts.index, y=df_min_ts['org_close'], name="min",marker_color='rgba(0, 255, 0, .9)'))
+      fig.add_trace(go.Scatter(mode="markers", x=df_max_ts.index, y=df_max_ts['org_close'], name="max",marker_color='rgba(255, 0, 0, .9)'))
 
-#fig = go.Figure(data=[go.Candlestick(x=data['date'],
-#                open=data['open'],
-#                high=data['high'],
-#                low=data['low'],
-#                close=data['close'])])
-fig = go.Figure(data= go.Scatter(
-    x=data['date'],
-    y=data['close'],
-    name='Original Data'
-))
-#fig = go.Figure([go.Scatter(x=df['Date'], y=df['AAPL.High'])])                
-fig.add_trace(go.Scatter(mode="markers", x=df_min_ts['date'], y=df_min_ts['close'], name="min",marker_color='rgba(0, 255, 0, .9)'))
-fig.add_trace(go.Scatter(mode="markers", x=df_max_ts['date'], y=df_max_ts['close'], name="max",marker_color='rgba(255, 0, 0, .9)'))
+      config = {'displayModeBar': False}
+      fig.show(config=config)
 
-config = {'displayModeBar': False}
-fig.show(config=config)
 
-# %%
-import matplotlib.pyplot as plt
-#plt.scatter(df_min_ts.index, df_min_ts['close'], c='g')
-plt.plot(df_min_ts.index, df_min_ts['close'], '^', color='green')
-plt.plot(df_max_ts.index, df_max_ts['close'], 'v', color='red')
-plt.plot(data['date'], data['close'], color='black')
-plt.show()
+    return df_min_ts, df_max_ts
 
-# %%
-features = []
-#exclude date from observation - start from column 1
-for c in data.columns[1:]:
-    s = Stream.source(list(data[c]), dtype="float").rename(data[c].name)
-    features += [s]
-feed = DataFeed(features)
-feed.compile()
-for i in range(5):
-    #print(feed.next())
-    pass
+def create_trade_env(quotes, observations ,symbol):
 
-# %% [markdown]
-# ## Setup Trading Environment
+  # Add features
+  features = []
+  #exclude "date/Column [0]" from observation - start from column 1
+  for c in data.columns[0:]:
+      s = Stream.source(list(data[c]), dtype="float").rename(data[c].name)
+      features += [s]
+  feed = DataFeed(features)
+  feed.compile()
 
-# %%
-# Make a stream of closing prices to make orders on
-from tensortrade.oms.instruments import Instrument, Quantity
-import tensortrade.env.default as default
-
-def create_trade_env(data,symbol):
-
-  # define exchange
+  # define exchange - needs to specify Price-Quote Stream
   exchange  = Exchange("sim-exchange", service=execute_order)(
-      Stream.source(list(data["close"]), dtype="float").rename(str("USD-{}").format(symbol))
+      Stream.source(list(quotes["close"]), dtype="float").rename(str("USD-{}").format(symbol))
   )
 
   # add current cash, initial-asset
-  cash = Wallet(exchange, 100000 * USD)
+  cash = Wallet(exchange, 10000 * USD)
   asset = Wallet(exchange, 0 * Instrument(symbol, 2, symbol))
 
   # initialize portfolio - base currency USD
@@ -182,7 +313,7 @@ def create_trade_env(data,symbol):
 
   # add element for rendered feed
   renderer_feed = DataFeed([
-      Stream.source(list(data["date"])).rename("date"),
+      Stream.source(list(data.index)).rename("date"),
       Stream.source(list(data["open"]), dtype="float").rename("open"),
       Stream.source(list(data["high"]), dtype="float").rename("high"),
       Stream.source(list(data["low"]), dtype="float").rename("low"),
@@ -190,14 +321,16 @@ def create_trade_env(data,symbol):
       #Stream.source(list(data["volume"]), dtype="float").rename("volume") 
   ])
 
-  # define reward-scheme
   reward_scheme = default.rewards.SimpleProfit()
-
+  action_scheme = default.actions.SimpleOrders(trade_sizes=1)
+  '''
+  # define reward-scheme
   # define action-scheme
   action_scheme = default.actions.BSH(
       cash=cash,
       asset=asset
   )
+  '''
 
   # create env
   env = default.create(
@@ -213,29 +346,33 @@ def create_trade_env(data,symbol):
 
   return env
 
-env = create_trade_env(data,symbol)
+def evaluate_model(model, env, num_steps=1000):
+  """
+  Evaluate a RL agent
+  :param model: (BaseRLModel object) the RL Agent
+  :param env: Trading-Env to be used
+  :param num_steps: (int) number of timesteps to evaluate it
+  :return: (float) Mean reward for the last 100 episodes
+  """
+  episode_rewards = [0.0]
+  obs = env.reset()
+  done = False
+  while not done:
+      # _states are only useful when using LSTM policies
+      action, _states = model.predict(obs)
+      obs, reward, done, info = env.step(action)
+      # Stats
+      episode_rewards[-1] += reward
 
-
-# %%
-env.observer.feed.next()
-
-# %%
-# ## Generate Expert Trajectories
-import gym
-
-from stable_baselines.gail import generate_expert_traj
-from tensortrade.oms.orders import (
-    Order,
-    proportion_order,
-    TradeSide,
-    TradeType
-)
-global_index = 4
-global_last_action = 0
+  # Compute mean reward for the last 100 episodes
+  mean_100ep_reward = round(np.mean(episode_rewards[-100:]), 1)
+  print("Mean reward:", mean_100ep_reward, "Num episodes:", len(episode_rewards))
+  
+  return mean_100ep_reward      
 
 # Here the expert is a random agent
 # but it can be any python function, e.g. a PID controller
-def expert_trader(_obs):
+def expert_trader(_obs, debug_info:bool = False):
     """
     Random agent. It samples actions randomly
     from the action space of the environment.
@@ -246,37 +383,47 @@ def expert_trader(_obs):
     global df_min_ts
     global df_max_ts
     global global_last_action
+    global global_buy_counter
+    global global_sell_counter
 
-    is_buy_action = not (df_min_ts.loc[(df_min_ts['high'] == _obs[0][0]) & 
-           (df_min_ts['low'] == _obs[0][1])  &
-           (df_min_ts['open'] == _obs[0][2])  &
-           (df_min_ts['close'] == _obs[0][3])
+    if debug_info:
+      print("obs:=", _obs[0][0],_obs[0][1],_obs[0][2],_obs[0][3])
+
+    # use df_min_ts.iloc[:, 1] to access columns by indices to match observations arrays
+    is_buy_action = not (df_min_ts.loc[(df_min_ts.iloc[:, 0] == _obs[0][0]) & 
+           (df_min_ts.iloc[:, 1] == _obs[0][1])  &
+           (df_min_ts.iloc[:, 2] == _obs[0][2])  &
+           (df_min_ts.iloc[:, 3] == _obs[0][3])
     ].empty)
 
-    is_sell_action = not (df_max_ts.loc[(df_max_ts['high'] == _obs[0][0]) & 
-           (df_max_ts['low'] == _obs[0][1])  &
-           (df_max_ts['open'] == _obs[0][2])  &
-           (df_max_ts['close'] == _obs[0][3])
+    is_sell_action = not (df_max_ts.loc[(df_max_ts.iloc[:, 0] == _obs[0][0]) & 
+           (df_max_ts.iloc[:, 1] == _obs[0][1])  &
+           (df_max_ts.iloc[:, 2] == _obs[0][2])  &
+           (df_max_ts.iloc[:, 3] == _obs[0][3])
         ].empty)
 
     if is_buy_action:
         #perform buy action
         global_last_action = 1
+        global_buy_counter += 1
+        if debug_info:
+          print("buy-action",global_buy_counter)
     elif is_sell_action:
         #perform sell action
         global_last_action = 0
+        global_sell_counter += 1
+        if debug_info:
+          print("sell-action",global_sell_counter)
     else:
         #do nothing
         pass
 
     return global_last_action
-# Data will be saved in a numpy archive named `expert_cartpole.npz`
-# when using something different than an RL expert,
-# you must pass the environment object explicitly
-generate_expert_traj(expert_trader, 'expert_trader', env, n_episodes=10)
-pass
 
+# %% [markdown]
+# ## Expert DataSet
 
+# %%
 # %%
 import queue
 import time
@@ -285,7 +432,6 @@ from multiprocessing import Queue, Process
 import cv2  # pytype:disable=import-error
 import numpy as np
 from joblib import Parallel, delayed
-
 from stable_baselines import logger
 
 
@@ -372,8 +518,7 @@ class ExpertDataset(object):
         self.std_ret = np.std(np.array(self.returns))
         self.verbose = verbose
 
-        assert len(self.observations) == len(self.actions), "The number of actions and observations differ " \
-                                                            "please check your expert dataset"
+        assert len(self.observations) == len(self.actions), "The number of actions and observations differ "                                                             "please check your expert dataset"
         self.num_traj = min(traj_limitation, np.sum(episode_starts))
         self.num_transition = len(self.observations)
         self.randomize = randomize
@@ -652,151 +797,95 @@ class DataLoader(object):
         if self.process is not None:
             self.process.terminate()
 
-# Pre-Train a Model using Behavior Cloning
-#import ExpertDataset
-# Using only one expert trajectory
-# you can specify `traj_limitation=-1` for using the whole dataset
-dataset = ExpertDataset(expert_path='expert_trader.npz',
-                        traj_limitation=1, batch_size=128)
-dataset.plot()
+# %% [markdown]
+#  # Trading Data
+
+# %%
+symbol = 'AAPL'
+exchange = 'NASDAQ'
+start_date = '2010-01-01'
+end_date = '2020-12-11'
+
+quotes = download_data(symbol=symbol, start_date=start_date, end_date=end_date, plot=True)
+quotes.head()
+
+# %% [markdown]
+# ## Apply Technical-Indicators (TA)
+# - Check https://github.com/bukosabino/ta
+# - TA- Visualization: https://github.com/bukosabino/ta/blob/master/examples_to_use/visualize_features.ipynb
+
+# %%
+# get ta-indicators
+data = add_custom_ta_features(quotes,"open","high","low","close", fillna=True,plot=True,apply_pct=False)
+data.tail()
+
+# %% [markdown]
+# ## Get Local Minima/Maxima
+# 
+
+# %%
+# get Min/Max TimeStamps
+tmp_data = data.iloc[:,0:4]
+tmp_data['org_close'] = quotes['close']
+df_min_ts, df_max_ts = find_loc_min_max(data=tmp_data,order_of_points=7, plot=True)
+df_min_ts.head()
+
+
+# %% [markdown]
+# # Create Trading-Enviornment
+
+# %%
+env = create_trade_env(quotes, data,symbol)
 
 
 # %%
-# export data
-export_csv = df_min_ts.to_csv (r'D:\MyWork\StocksTrading\Sandboxes\AutoTrader\tensortrade\examples\data\Minimum_Points.csv', index=None, header=True)
+env.observer.feed.next()
+
+
+# %% [markdown]
+# # Train RL-Agent using Expert-Records
 
 # %%
 # PPO2-Model
 from stable_baselines.common.policies import MlpPolicy, MlpLnLstmPolicy
-agent = PPO2(MlpPolicy, env, verbose=1)
+
+VecEnv = DummyVecEnv([lambda: create_trade_env(quotes, data,symbol)])
+agent = PPO2(MlpPolicy, env=VecEnv, verbose=1,tensorboard_log=os.path.join(currentdir,"logs"))
 # Pretrain the PPO2 model
-agent.pretrain(dataset, n_epochs=100)
+#agent.pretrain(dataset, n_epochs=1000)
 
 # As an option, you can train the RL agent
-# model.learn(int(1e5))
-agent.save(save_path=os.path.join(currentdir, "agents","BC_PPO2_MlpPolicy.zip"))
+agent.learn(int(1e5),tb_log_name="learn_"+symbol)
+agent.save(save_path=os.path.join(currentdir, "BC_PPO2_MlpPolicy_NORM.zip"))
 
 
 # %%
-# DQN-Model
-from stable_baselines.deepq.policies import MlpPolicy
-agent = DQN(MlpPolicy, env, verbose=1, tensorboard_log=os.path.join(currentdir,"tf_board_log","DQN"))
-agent.learn(total_timesteps=25000)
-agent.save(save_path=os.path.join(currentdir, "agents","DQN_MlpPolicy_02.zip"))
-
-
-# %%
-# PPO2-Model
-from stable_baselines.common.policies import MlpPolicy, MlpLnLstmPolicy
-agent = PPO2(MlpPolicy, env, verbose=1)
-agent.learn(total_timesteps=25000)
-agent.save(save_path=os.path.join(currentdir, "agents","PPO2_MlpPolicy.zip"))
-
-# %%
-# PPO2-Model - VecEnv
-from stable_baselines.common.policies import MlpPolicy, MlpLnLstmPolicy
-from stable_baselines.common.vec_env import DummyVecEnv
-
-
-# The algorithms require a vectorized environment to run
-VecEnv = DummyVecEnv([lambda: create_trade_env(data,symbol)])
-
-agent = PPO2(MlpPolicy, env, verbose=1)
-agent.learn(total_timesteps=25000)
-agent.save(save_path=os.path.join(currentdir, "agents","PPO2_MlpPolicy_02_VecEnv.zip"))
-
-
-# %%
-# A2C-Model
-from stable_baselines.common.policies import MlpPolicy, MlpLnLstmPolicy
-agent = A2C(MlpPolicy, env, verbose=1)
-agent.learn(total_timesteps=25000)
-agent.save(save_path=os.path.join(currentdir, "agents","A2C_MlpPolicy.zip"))
-
-
-# %%
-agent = DQNAgent(env)
-agent.train(n_steps=200, n_episodes=2, save_path="agents/")
+# Load the TensorBoard notebook extension
+get_ipython().run_line_magic('load_ext', 'tensorboard')
+get_ipython().run_line_magic('tensorboard', '--logdir logs/')
+#tensorboard = TensorBoard(log_dir="./logs")
 
 # %% [markdown]
-# 
-# %% [markdown]
-# ## Evaluate Training
-# 
+#  ## Evaluate Model
 
 # %%
-get_ipython().run_line_magic('matplotlib', 'inline')
-portfolio.performance.plot()
-
-
-# %%
-portfolio.performance.net_worth.plot()
-
-# %% [markdown]
-# ### Environment with Multiple Renderers
-# Create PlotlyTradingChart and FileLogger renderers. Configuring renderers is optional as they can be used with their default settings.
-
-# %%
-chart_renderer = PlotlyTradingChart(
-    display=True,  # show the chart on screen (default)
-    #height=800,  # affects both displayed and saved file height. None for 100% height.
-    #save_format="html",  # save the chart to an HTML file
-    #auto_open_html=True,  # open the saved HTML chart in a new browser tab
-)
-
-file_logger = FileLogger(
-    filename="dqn_test.log",  # omit or None for automatic file name
-    path= os.path.join(currentdir, "test_logs")  # create a new directory if doesn't exist, None for no directory
-)
+symbol = 'AACQU'
+start_date = '2010-01-01'
+end_date = '2020-12-11'
+#MSFT, TSLA, AAPL,NFLX,GOOG, GLD
+quotes = download_data(symbol=symbol, start_date=start_date, end_date=end_date,plot=True)
+data = add_custom_ta_features(quotes,"open","high","low","close", fillna=True)
+#df_min_ts, df_max_ts = find_loc_min_max(data=quotes,order_of_points=7, plot=True)
+env = create_trade_env(quotes, data,symbol)
 
 
 # %%
-# custom env
-env = default.create(
-    portfolio=portfolio,
-    action_scheme="managed-risk",
-    reward_scheme="risk-adjusted",
-    feed=feed,
-    window_size=20,
-    renderer_feed=feed,
-    renderers=[
-        chart_renderer, 
-        file_logger
-    ]
-)
-
-
-
 # %%
-def evaluate(model, num_steps=1000):
-  """
-  Evaluate a RL agent
-  :param model: (BaseRLModel object) the RL Agent
-  :param num_steps: (int) number of timesteps to evaluate it
-  :return: (float) Mean reward for the last 100 episodes
-  """
-  episode_rewards = [0.0]
-  obs = env.reset()
-  done = False
-  while not done:
-      # _states are only useful when using LSTM policies
-      action, _states = model.predict(obs)
-
-      obs, reward, done, info = env.step(action)
-      
-      # Stats
-      episode_rewards[-1] += reward
-
-  # Compute mean reward for the last 100 episodes
-  mean_100ep_reward = round(np.mean(episode_rewards[-100:]), 1)
-  print("Mean reward:", mean_100ep_reward, "Num episodes:", len(episode_rewards))
-  
-  return mean_100ep_reward
-
-# %%
-agent = PPO2.load(load_path=os.path.join(currentdir, "agents","PPO2_MlpPolicy.zip"))
+VecEnv = DummyVecEnv([lambda: create_trade_env(quotes, data,symbol)])
+agent = PPO2.load(load_path=os.path.join(currentdir, "BC_PPO2_MlpPolicy_NORM.zip"))
 #agent = DQN.load(load_path=os.path.join(currentdir, "agents","DQN_MlpPolicy_02.zip"), env=env)
-evaluate(agent,num_steps=10000)
+evaluate_model(agent, env)
+
 
 # %%
 #portfolio.performance.net_worth.plot()
@@ -805,12 +894,146 @@ performance['net_worth'].plot()
 
 
 # %%
-# PPO2-Model
-from stable_baselines.common.policies import MlpPolicy, MlpLnLstmPolicy
-from stable_baselines.common.vec_env import DummyVecEnv
+performance['net_worth'].tail()
+
+# %% [markdown]
+# # Load Financial Symbols
+
+# %%
+get_ipython().system('pip install finsymbols')
 
 
-# The algorithms require a vectorized environment to run
-VecEnv = DummyVecEnv([lambda: create_trade_env(data,symbol)])
+# %%
+from finsymbols import symbols
+import json
+import pprint
+
+#symbol_list = symbols.get_sp500_symbols()
+#symbol_list.extend(symbols.get_amex_symbols())
+#symbol_list.extend(symbols.get_nyse_symbols())
+#symbol_list.extend(symbols.get_nasdaq_symbols())
+symbol_list = symbols.get_nasdaq_symbols()
+
+column_names = ['company','headquarters', 'industry','sector','symbol']
+df = pd.DataFrame(symbol_list, columns=column_names)
+my_symbols = df['symbol'].replace("\n", "", regex=True)
+
+# %% [markdown]
+# # Loops
+# %% [markdown]
+# ## Create expert Recordings
+
+# %%
+# Download List of NASDAQ Insturment
+df = pd.read_csv('nasdaq_list.csv')
+#df = df.iloc[17:]
+df.head()
+
+
+# %%
+start_date = '2010-01-01'
+end_date = '2020-12-11'
+for symbol in df['Symbol']:
+  #MSFT, TSLA, AAPL,NFLX,GOOG, GLD
+  print("symbol:=", symbol)
+  quotes = download_data(symbol=symbol, start_date=start_date, end_date=end_date,plot=True)
+  if (not quotes.empty) and (len(quotes)>100):
+    data = add_custom_ta_features(quotes,"open","high","low","close", fillna=True)
+    # get Min/Max TimeStamps
+    tmp_data = data.iloc[:,0:4]
+    tmp_data['org_close'] = quotes['close']
+    df_min_ts, df_max_ts = find_loc_min_max(data=tmp_data,order_of_points=7, plot=True, symbol=symbol)
+    env = create_trade_env(quotes, data,symbol)
+
+    global_buy_counter = 0
+    global_sell_counter = 0
+    global_last_action = 0
+    try:
+      generate_expert_traj(expert_trader, 'expert_trader_'+symbol, env, n_episodes=10)
+    except:
+      print("An exception occurred while generating recording for symbol:=",symbol)
+    
+
+# %% [markdown]
+# ## Trainning Loop
+
+# %%
+current = os.getcwd()
+model_path = os.path.join(currentdir, "LOOP_PPO2_MlpPolicy_NORM.zip")
+
+for filename in os.listdir(current):
+    #extract pretrain file
+    if filename.endswith(".npz"):
+      # get symbol-name
+      x = filename.split("expert_trader_")
+      x= x[1].split(".npz")
+      symbol=x[0]
+
+      f = open('traing_progress.txt', 'a')
+      f.write("pre-train: " + symbol)
+      f.close()
+      
+      # create env
+      quotes = download_data(symbol=symbol, start_date=start_date, end_date=end_date,plot=True)
+      data = add_custom_ta_features(quotes,"open","high","low","close", fillna=True)
+      env = create_trade_env(quotes, data,symbol)
+      VecEnv = DummyVecEnv([lambda: create_trade_env(quotes, data,symbol)])
+
+      if os.path.isfile(model_path):
+        #load agent
+        agent = PPO2.load(load_path=model_path, env=VecEnv,tensorboard_log=os.path.join(currentdir,"logs"))
+        print("Agent has been loaded: Symbol= ", symbol)
+        
+      else:
+        #create new agent
+        agent = PPO2(policy=MlpPolicy, env=VecEnv, verbose=1,tensorboard_log=os.path.join(currentdir,"logs"))
+        print("new Agent has been created: Symbol= ", symbol)
+
+      # Pretrain the PPO2 model
+      dataset = ExpertDataset(expert_path='expert_trader_'+ symbol +'.npz',
+                              traj_limitation=10, batch_size=64, randomize = False)      
+      agent.pretrain(dataset, n_epochs=100)
+
+      # As an option, you can train the RL agent
+      agent.learn(int(1e4),tb_log_name="learn_"+symbol)
+      
+      #save Model
+      agent.save(save_path=model_path)
+      print("Agent has been Saved: Symbol= ", symbol)
+      print("--------------------------------------------------")
+
+
+    else:
+        continue
+
+
+# %%
+VecEnv = DummyVecEnv([lambda: create_trade_env(quotes, data,symbol)])
+
+#agent = DQN.load(load_path=os.path.join(currentdir, "agents","DQN_MlpPolicy_02.zip"), env=env)
+evaluate_model(agent, env)
+
+
+# %%
+agent = PPO2.load(load_path=os.path.join(currentdir, "BC_PPO2_MlpPolicy_NORM.zip"))
+# Pretrain the PPO2 model
+agent.pretrain(dataset, n_epochs=1000)
+
+# As an option, you can train the RL agent
+agent.learn(int(1e5),tb_log_name="learn_"+symbol)
+
+# %% [markdown]
+# # Evaulate using Pyfolio
+
+# %%
+rets = px[['AdjClose']]
+rets = rets.shift(-1)
+rets.iloc[-1]['AdjClose'] = px.tail(1)['AdjOpen']
+rets = rets.shift(1) / rets - 1
+rets = rets.dropna()
+rets.index = rets.index.to_datetime()
+rets.index = rets.index.tz_localize("UTC")
+rets.columns = [symbol]
+return rets
 
 
