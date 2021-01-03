@@ -462,7 +462,8 @@ class PlotlyTradingChart(BaseRenderer):
                     commission=trade.commission
                 )
             else:
-                raise ValueError(f"Valid trade side values are 'buy' and 'sell'. Found '{trade.side.value}'.")
+                #raise ValueError(f"Valid trade side values are 'buy' and 'sell'. Found '{trade.side.value}'.")
+                pass
 
             hovertext = 'Step {step} [{datetime}]<br>' \
                         '{side} {qty} {quote_instrument} @ {price} {base_instrument} {type}<br>' \
@@ -518,7 +519,7 @@ class PlotlyTradingChart(BaseRenderer):
         ))
         self.fig.layout.annotations += self._create_trade_annotations(trades, price_history)
 
-        self._volume_chart.update({'y': price_history['volume']})
+        #self._volume_chart.update({'y': price_history['volume']})
 
         for trace in self.fig.select_traces(row=3):
             trace.update({'y': performance[trace.name]})

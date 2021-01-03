@@ -32,6 +32,9 @@ class Position(TimedIdentifiable):
         self.order = order
         self.is_buy = True if order.side == TradeSide.BUY else False
         self.is_sell = True if order.side == TradeSide.SELL else False
+        
+        # flag to indicate the quantity is transfered to locked section in wallet
+        self.is_locked = False
 
     def get_worth_value(self) -> float:
         """Calculate the Worth Value based on Position-Type
@@ -48,7 +51,7 @@ class Position(TimedIdentifiable):
         #TODO: support buy/sell Price difference
         sell_price = self.order.exchange_pair.price
         buy_price  = self.order.exchange_pair.price
-        if self.is_open:
+        if self.is_open and not self.is_locked:
             if self.is_buy:
                 # calculate worth-bought value based on amounts
                 return self.quantity.size * sell_price
@@ -58,6 +61,32 @@ class Position(TimedIdentifiable):
                 # Broker lends stocks to the trader then immediately sells the stocks, and, after their price goes down, buys them back for a lower price. He then returns the assets to the broker and keeps the difference.
                 diff = (self.quantity.size * self.order.price) - (self.quantity.size * buy_price)
                 return (self.quantity.size * self.order.price) + diff
+        else:
+            return 0
+
+    def get_worth_quantity(self):
+        """Calculate the Worth Quanity based on Position-Type
+        Parameters - needed to update Wallet balance
+        ----------
+        - buy_price : float
+            the current buying price indicated by the Broker
+        - sell_price:             
+            the current selling price indicated by the Broker
+        Returns
+        -------
+        `float`: worth quantity of position
+        """        
+        sell_price = self.order.exchange_pair.price
+        buy_price  = self.order.exchange_pair.price
+        if self.is_open and not self.is_locked:
+            if self.is_buy:
+                # calculate worth-bought value based on amounts
+                return self.get_worth_value()/sell_price
+            else:
+                # calculate worth-bought value based on amounts
+                # note: sell-position is also know as short-position - 
+                # Broker lends stocks to the trader then immediately sells the stocks, and, after their price goes down, buys them back for a lower price. He then returns the assets to the broker and keeps the difference.
+                return self.get_worth_value()/buy_price
         else:
             return 0
 

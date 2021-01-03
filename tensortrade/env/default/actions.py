@@ -223,7 +223,7 @@ class SimpleOrders(TensorTradeActionScheme):
     @property
     def action_space(self) -> Space:
         if not self._action_space:
-            self.actions = [TradeSide.BUY, TradeSide.SELL]
+            self.actions = [TradeSide.BUY, TradeSide.SELL, TradeSide.CLOSE]
             self.actions = list(product(self.portfolio.exchange_pairs, self.actions))
             # Add Hold-Action to beginning
             self.actions = [None] + self.actions
@@ -267,7 +267,8 @@ class SimpleOrders(TensorTradeActionScheme):
                     #close positions based on last opened orders
                     #quantity = Quantity(instrument=ep.pair.quote, size=position.quantity.size)
                     # adjut worth quantity - if sell-position already open
-                    quantity = Quantity(instrument=ep.pair.quote, size=position.get_worth_value()/ep.price)
+                    quantity = Quantity(instrument=ep.pair.quote, size=position.get_worth_quantity())
+                    position.is_locked = True
                     order = Order(
                         path_id = position.id,
                         step=self.clock.step,
@@ -293,35 +294,36 @@ class SimpleOrders(TensorTradeActionScheme):
                     self.broker.submit(order)
                     self.broker.update()
             
-            # return money to base-wallets
-            instrument = side.instrument(ep.pair)
+            if side != TradeSide.CLOSE:
+                # return money to base-wallets
+                instrument = side.instrument(ep.pair)
 
-            balance = base_wallet.balance.as_float()
-            size = (balance * proportion)
-            size = min(balance, size)
+                balance = base_wallet.balance.as_float()
+                size = (balance * proportion)
+                size = min(balance, size)
 
-            quantity = (size * instrument).quantize()
+                quantity = (size * instrument).quantize()
 
-            value = size*float(price)
-            if size < 10 ** -instrument.precision \
-                    or value < self.min_order_pct*portfolio.net_worth:
-                return []
+                value = size*float(price)
+                if size < 10 ** -instrument.precision \
+                        or value < self.min_order_pct*portfolio.net_worth:
+                    return []
 
-            order = Order(
-                step=self.clock.step,
-                side=side,
-                trade_type=self._trade_type,
-                exchange_pair=ep,
-                price=ep.price,
-                quantity=quantity,
-                criteria=criteria,
-                end=self.clock.step + duration if duration else None,
-                portfolio=portfolio
-            )
-            orders.append(order)
+                order = Order(
+                    step=self.clock.step,
+                    side=side,
+                    trade_type=self._trade_type,
+                    exchange_pair=ep,
+                    price=ep.price,
+                    quantity=quantity,
+                    criteria=criteria,
+                    end=self.clock.step + duration if duration else None,
+                    portfolio=portfolio
+                )
+                orders.append(order)
 
-            if self._order_listener is not None:
-                order.attach(self._order_listener)
+                if self._order_listener is not None:
+                    order.attach(self._order_listener)
 
             # TODO: Check a way to check: check only when order is completed
             self.action = action

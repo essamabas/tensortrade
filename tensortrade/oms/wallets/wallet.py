@@ -97,8 +97,12 @@ class Wallet(Identifiable):
     @property
     def total_balance(self) -> 'Quantity':
         """The total balance of the wallet available for use and locked in orders. (`Quantity`, read-only)"""
-        total_balance = self.balance
+        tmp_worth_quantity = self.total_worth_quantity
+        if  tmp_worth_quantity > 0:
+            # modify balance with new worth
+            self.balance = tmp_worth_quantity
 
+        total_balance = self.balance
         for quantity in self._locked.values():
             total_balance += quantity.size
 
@@ -112,6 +116,16 @@ class Wallet(Identifiable):
         for position in self._positions.values():
             total_worth_value += position.get_worth_value()
         return Quantity(instrument=self.instrument, size=total_worth_value)
+
+    @property
+    def total_worth_quantity(self) -> 'Quantity':
+        """The total worth quantity of the wallet based on positions. (`Quantity`, read-only)"""
+        total_worth_quantity = 0
+
+        for position in self._positions.values():
+            total_worth_quantity += position.get_worth_quantity()
+        return Quantity(instrument=self.instrument, size=total_worth_quantity)
+
 
     @property
     def locked(self) -> 'Dict[str, Quantity]':
