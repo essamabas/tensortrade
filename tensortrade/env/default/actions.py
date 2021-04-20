@@ -1,4 +1,4 @@
-
+import logging
 from abc import abstractmethod
 from itertools import product
 from typing import Union, List, Any
@@ -93,6 +93,7 @@ class TensorTradeActionScheme(ActionScheme):
 
         for order in orders:
             if order:
+                logging.info('Step {}: {} {}'.format(order.step, order.side, order.quantity))
                 self.broker.submit(order)
 
         self.broker.update()
@@ -157,6 +158,10 @@ class BSH(TensorTradeActionScheme):
         if abs(action - self.action) > 0:
             src = self.cash if self.action == 0 else self.asset
             tgt = self.asset if self.action == 0 else self.cash
+
+            if src.balance == 0:  # We need to check, regardless of the proposed order, if we have balance in 'src'
+                return []  # Otherwise just return an empty order list
+
             order = proportion_order(portfolio, src, tgt, 1.0)
             self.action = action
 
@@ -189,6 +194,10 @@ class SimpleOrders(TensorTradeActionScheme):
         A type of trade to make.
     order_listener : OrderListener
         A callback class to use for listening to steps of the order process.
+    min_order_pct : float
+        The minimum value when placing an order, calculated in percent over net_worth.
+    min_order_abs : float
+        The minimum value when placing an order, calculated in absolute order value.
     """
 
     def __init__(self,
@@ -197,9 +206,11 @@ class SimpleOrders(TensorTradeActionScheme):
                  durations: 'Union[List[int], int]' = None,
                  trade_type: 'TradeType' = TradeType.MARKET,
                  order_listener: 'OrderListener' = None,
-                 min_order_pct: float = 0.02) -> None:
+                 min_order_pct: float = 0.02,
+                 min_order_abs: float = 0.00) -> None:
         super().__init__()
         self.min_order_pct = min_order_pct
+        self.min_order_abs = min_order_abs
         criteria = self.default('criteria', criteria)
         self.criteria = criteria if isinstance(criteria, list) else [criteria]
 
@@ -231,8 +242,8 @@ class SimpleOrders(TensorTradeActionScheme):
             self._action_space = Discrete(len(self.actions))
         return self._action_space
 
-    def get_orders(self, 
-                   action: int, 
+    def get_orders(self,
+                   action: int,
                    portfolio: 'Portfolio') -> 'List[Order]':
         
         # HOLD Action
@@ -350,6 +361,10 @@ class ManagedRiskOrders(TensorTradeActionScheme):
         A type of trade to make.
     order_listener : OrderListener
         A callback class to use for listening to steps of the order process.
+    min_order_pct : float
+        The minimum value when placing an order, calculated in percent over net_worth.
+    min_order_abs : float
+        The minimum value when placing an order, calculated in absolute order value.
     """
 
     def __init__(self,
@@ -358,8 +373,12 @@ class ManagedRiskOrders(TensorTradeActionScheme):
                  trade_sizes: 'Union[List[float], int]' = 10,
                  durations: 'Union[List[int], int]' = None,
                  trade_type: 'TradeType' = TradeType.MARKET,
-                 order_listener: 'OrderListener' = None) -> None:
+                 order_listener: 'OrderListener' = None,
+                 min_order_pct: float = 0.02,
+                 min_order_abs: float = 0.00) -> None:
         super().__init__()
+        self.min_order_pct = min_order_pct
+        self.min_order_abs = min_order_abs
         self.stop = self.default('stop', stop)
         self.take = self.default('take', take)
 
@@ -412,7 +431,9 @@ class ManagedRiskOrders(TensorTradeActionScheme):
         size = min(balance, size)
         quantity = (size * instrument).quantize()
 
-        if size < 10 ** -ep.pair.base.precision:
+        if size < 10 ** -instrument.precision \
+                or size < self.min_order_pct * portfolio.net_worth \
+                or size < self.min_order_abs:
             return []
 
         params = {
