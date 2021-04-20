@@ -461,6 +461,24 @@ class PlotlyTradingChart(BaseRenderer):
                     type=trade.type.value.upper(),
                     commission=trade.commission
                 )
+
+            elif trade.side.value == 'close':
+                color = 'blue'
+                ay = 15
+                # qty = round(ts * tp, trade.quote_instrument.precision)
+
+                text_info = dict(
+                    step=trade.step,
+                    datetime=price_history.iloc[trade.step - 1]['date'],
+                    side=trade.side.value.upper(),
+                    qty=ts,
+                    size=round(ts * tp, trade.base_instrument.precision),
+                    quote_instrument=trade.quote_instrument,
+                    price=tp,
+                    base_instrument=trade.base_instrument,
+                    type=trade.type.value.upper(),
+                    commission=trade.commission
+                )                
             else:
                 #raise ValueError(f"Valid trade side values are 'buy' and 'sell'. Found '{trade.side.value}'.")
                 pass

@@ -299,21 +299,23 @@ def macd(price: Stream[float], fast: float, slow: float, signal: float) -> Strea
     return signal
 
 from etoro_interface import HttpClient, Metadata, LightStreamListener
-import aiohttp
 import asyncio
 class eToroClose(Stream):
 
-    def __init__(self, symbol_id:int):
+    def __init__(self, 
+                symbol_id:int, 
+                field_name: str):
         super().__init__()
         self.eToroClient = HttpClient()
         self.symbol_id = str(symbol_id)
+        self.field_name = field_name
 
     def forward(self):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         #result = loop.run_until_complete(self.eToroClient.get_candle_data(instrument_id=self.symbol_id,timeframe='1D',no_intervals=1))
-        result = self.eToroClient.get_candle_data(instrument_id=self.symbol_id,timeframe='1D',no_intervals=1)
-        return result['close'].values[0]
+        result = self.eToroClient.get_candle_data(instrument_id=self.symbol_id,timeframe='1M',no_intervals=1)
+        return result[self.field_name].values[0]
 
     def has_next(self):
         return True
@@ -330,10 +332,13 @@ def create_trade_env(quotes, observations ,symbol):
     #    s = Stream.source(list(data[c]), dtype="float").rename(data[c].name)
     #    features += [s]
     
-    cp = eToroClose(symbol_id=32)
+    cp = eToroClose(symbol_id=32, field_name='close')
     features = [
         #cp.log().diff().rename("lr"),
-        cp.rename("close")
+        cp.rename("close"),
+        eToroClose(symbol_id=32, field_name='high').rename('high'),
+        eToroClose(symbol_id=32, field_name='open').rename('open'),
+        eToroClose(symbol_id=32, field_name='low').rename('low'),
         #rsi(cp, period=20).rename("rsi"),
         #macd(cp, fast=10, slow=50, signal=5).rename("macd")
     ]
@@ -342,7 +347,7 @@ def create_trade_env(quotes, observations ,symbol):
     feed.compile()
 
     # define exchange - needs to specify Price-Quote Stream
-    exchange  = Exchange("sim-exchange", service=execute_order)(
+    exchange  = Exchange("etoro-exchange", service=execute_order)(
         cp.rename(str("USD-{}").format(symbol))
     )
 

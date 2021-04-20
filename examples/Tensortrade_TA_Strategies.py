@@ -318,6 +318,30 @@ indicator_symbol=indicator_symbol,
                             plot=True)
 
 # %%
+# Reference: Python for Finance Cookbook - Over 50 Recei...
+# Page: 210
+import pyfolio as pf
+RISKY_ASSETS = ['AAPL']
+START_DATE = '2017-01-01'
+END_DATE = '2020-12-31'
+n_assets = len(RISKY_ASSETS)
+#3. Download the stock prices from Yahoo Finance:
+prices_df = yf.download(RISKY_ASSETS, start=START_DATE,
+end=END_DATE, adjusted=True)
+#4. Calculate individual asset returns:
+returns = prices_df['Adj Close'].pct_change().dropna()
+#5. Define the weights:
+portfolio_weights = n_assets * [1 / n_assets]
+#6. Calculate the portfolio returns:
+#portfolio_returns = pd.Series(np.dot(portfolio_weights, returns.T),
+#index=returns.index)
+portfolio_returns = returns
+#7. Create the tear sheet (simple variant):
+pf.create_simple_tear_sheet(portfolio_returns)
+
+
+
+# %%
 data = ta_f.get_BSH_signals(df=data, indicator_symbol='SRSI', plot=True)
 
 # %% [markdown]
